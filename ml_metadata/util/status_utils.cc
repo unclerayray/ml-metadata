@@ -1,4 +1,4 @@
-/* Copyright 2019 Google LLC
+/* Copyright 2021 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -12,29 +12,21 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include "ml_metadata/util/status_utils.h"
 
-#include "ml_metadata/metadata_store/test_util.h"
-
-#include <cstddef>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <gtest/gtest.h>
-#include "absl/strings/str_cat.h"
+#include "absl/status/status.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/types.h"
 
 namespace ml_metadata {
-namespace testing {
 
-ProtoStringMatcher::ProtoStringMatcher(const string& expected)
-    : expected_(expected) {}
-ProtoStringMatcher::ProtoStringMatcher(
-    const ::tensorflow::protobuf::Message& expected)
-    : expected_(expected.DebugString()) {}
+tensorflow::Status FromABSLStatus(const absl::Status& s) {
+  if (s.ok()) {
+    return tensorflow::Status();
+  }
+  // The string types may differ between std::string and ::string, so do an
+  // explicit conversion.
+  return tensorflow::Status(static_cast<tensorflow::error::Code>(s.code()),
+                            s.message());
+}
 
-}  // namespace testing
 }  // namespace ml_metadata

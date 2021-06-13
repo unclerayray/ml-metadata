@@ -23,6 +23,23 @@ The recommended way to install ML Metadata is to use the
 pip install ml-metadata
 ```
 
+Then import the relevant packages:
+
+```python
+from ml_metadata import metadata_store
+from ml_metadata.proto import metadata_store_pb2
+```
+
+### Nightly Packages
+
+ML Metadata (MLMD) also hosts nightly packages at
+https://pypi-nightly.tensorflow.org on Google Cloud. To install the latest
+nightly package, please use the following command:
+
+```bash
+pip install -i https://pypi-nightly.tensorflow.org/simple ml-metadata
+```
+
 ## Installing with Docker
 
 This is the recommended way to build ML Metadata under Linux, and is
@@ -40,7 +57,7 @@ sudo docker-compose build ${DOCKER_SERVICE}
 sudo docker-compose run ${DOCKER_SERVICE}
 ```
 
-where `PY_VERSION` is one of `{27, 35, 36, 37}`.
+where `PY_VERSION` is one of `{36, 37, 38}`.
 
 A wheel will be produced under `dist/`, and installed as follows:
 
@@ -81,7 +98,7 @@ pass `-b <branchname>` to the `git clone` command.
 ML Metadata uses Bazel to build the pip package from source:
 
 ```shell
-bazel run -c opt --define grpc_no_ares=true ml_metadata:build_pip_package
+python setup.py bdist_wheel
 ```
 
 You can find the generated `.whl` file in the `dist` subdirectory.
@@ -104,6 +121,6 @@ bazel build -c opt --define grpc_no_ares=true  //ml_metadata/metadata_store:meta
 
 MLMD is built and tested on the following 64-bit operating systems:
 
-*   macOS 10.12.6 (Sierra) or later.
+*   macOS 10.14.6 (Mojave) or later.
 *   Ubuntu 16.04 or later.
 *   Windows 7 or later.

@@ -16,81 +16,98 @@ limitations under the License.
 #ifndef ML_METADATA_METADATA_STORE_TEST_UTIL_H_
 #define ML_METADATA_METADATA_STORE_TEST_UTIL_H_
 
-#include <functional>
-#include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 
+#include <glog/logging.h>
+#include "google/protobuf/text_format.h"
 #include "google/protobuf/util/message_differencer.h"
 #include <gmock/gmock.h>
-#include "absl/strings/str_join.h"
-#include "absl/strings/str_split.h"
-#include "absl/strings/string_view.h"
-#include "ml_metadata/metadata_store/types.h"
-#include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/protobuf.h"
-#include "tensorflow/core/platform/types.h"
+#include <gtest/gtest.h>
 
 namespace ml_metadata {
 namespace testing {
 
-using tensorflow::protobuf::TextFormat;
-
-// Simple implementation of a proto matcher comparing string representations.
-//
-// IMPORTANT: Only use this for protos whose textual representation is
-// deterministic (that may not be the case for the map collection type).
-
+template <typename Message>
 class ProtoStringMatcher {
  public:
-  explicit ProtoStringMatcher(const string& expected);
-  explicit ProtoStringMatcher(const ::tensorflow::protobuf::Message& expected);
+  explicit ProtoStringMatcher(
+      const Message& expected,
+      const std::vector<std::string>& ignore_fields = {})
+      : expected_(expected), ignore_fields_(ignore_fields) {}
 
-  template <typename Message>
   bool MatchAndExplain(const Message& p,
                        ::testing::MatchResultListener* /* listener */) const;
 
-  void DescribeTo(::std::ostream* os) const { *os << expected_; }
+  void DescribeTo(::std::ostream* os) const { *os << expected_.DebugString(); }
+
   void DescribeNegationTo(::std::ostream* os) const {
-    *os << "not equal to expected message: " << expected_;
+    *os << "not equal to expected message: " << expected_.DebugString();
   }
 
  private:
-  const string expected_;
+  const Message expected_;
+  const std::vector<std::string>& ignore_fields_;
 };
 
-template <typename T>
-T CreateProto(const string& textual_proto) {
-  T proto;
-  CHECK(TextFormat::ParseFromString(textual_proto, &proto));
-  return proto;
-}
+template <typename Message, typename Tuple>
+class TupleProtoMatcher : public ::testing::MatcherInterface<Tuple> {
+ public:
+  explicit TupleProtoMatcher(const std::vector<std::string>& ignore_fields)
+      : ignore_fields_(ignore_fields) {}
+
+  bool MatchAndExplain(
+      Tuple args,
+      ::testing::MatchResultListener* /* listener */) const override {
+    return ProtoStringMatcher<Message>(std::get<0>(args), ignore_fields_)
+        .MatchAndExplain(std::get<1>(args), nullptr);
+  }
+
+  void DescribeTo(::std::ostream* os) const override { *os << "are equal"; }
+
+  void DescribeNegationTo(::std::ostream* os) const override {
+    *os << "are not equal";
+  }
+
+ private:
+  const std::vector<std::string>& ignore_fields_;
+};
 
 template <typename Message>
-bool ProtoStringMatcher::MatchAndExplain(
+bool ProtoStringMatcher<Message>::MatchAndExplain(
     const Message& p, ::testing::MatchResultListener* /* listener */) const {
-  return google::protobuf::util::MessageDifferencer::Equals(
-      p, CreateProto<Message>(expected_));
+  google::protobuf::util::MessageDifferencer diff;
+  for (const std::string& field_name : ignore_fields_) {
+    const google::protobuf::FieldDescriptor* field_descriptor =
+        p.descriptor()->FindFieldByName(field_name);
+    diff.IgnoreField(field_descriptor);
+  }
+  return diff.Compare(p, expected_);
 }
 
 // Polymorphic matcher to compare any two protos.
-inline ::testing::PolymorphicMatcher<ProtoStringMatcher> EqualsProto(
-    const string& x) {
-  return ::testing::MakePolymorphicMatcher(ProtoStringMatcher(x));
+template <typename Message>
+inline ::testing::PolymorphicMatcher<ProtoStringMatcher<Message>> EqualsProto(
+    const Message& x, const std::vector<std::string>& ignore_fields = {}) {
+  return ::testing::MakePolymorphicMatcher(
+      ProtoStringMatcher<Message>(x, ignore_fields));
 }
 
-// Polymorphic matcher to compare any two protos.
-inline ::testing::PolymorphicMatcher<ProtoStringMatcher> EqualsProto(
-    const ::tensorflow::protobuf::Message& x) {
-  return ::testing::MakePolymorphicMatcher(ProtoStringMatcher(x));
+// A polymorphic matcher for a 2-tuple where first.Equals(second) = true.
+template <typename Message>
+inline ::testing::Matcher<::testing::tuple<Message, Message>> EqualsProto(
+    const std::vector<std::string>& ignore_fields = {}) {
+  return ::testing::MakeMatcher(
+      new TupleProtoMatcher<Message, ::testing::tuple<Message, Message>>(
+          ignore_fields));
 }
 
 // Parse input string as a protocol buffer.
 template <typename T>
-T ParseTextProtoOrDie(const string& input) {
+T ParseTextProtoOrDie(const std::string& input) {
   T result;
-  CHECK(TextFormat::ParseFromString(input, &result))
+  CHECK(google::protobuf::TextFormat::ParseFromString(input, &result))
       << "Failed to parse: " << input;
   return result;
 }

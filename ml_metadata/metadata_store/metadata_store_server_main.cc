@@ -22,12 +22,14 @@ limitations under the License.
 #include "grpcpp/security/server_credentials.h"
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
+
 #include "absl/strings/str_cat.h"
 #include "ml_metadata/metadata_store/metadata_store.h"
 #include "ml_metadata/metadata_store/metadata_store_factory.h"
 #include "ml_metadata/metadata_store/metadata_store_service_impl.h"
 #include "ml_metadata/proto/metadata_store.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/strings/numbers.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/env.h"
@@ -95,6 +97,7 @@ bool ParseMetadataStoreServerConfigOrDie(
 bool ParseMySQLFlagsBasedServerConfigOrDie(
     const std::string& host, const int port, const std::string& database,
     const std::string& user, const std::string& password,
+    const bool enable_database_upgrade, const int64 downgrade_db_schema_version,
     ml_metadata::MetadataStoreServerConfig* server_config) {
   if (host.empty() && database.empty() && port == 0) {
     return false;
@@ -114,6 +117,23 @@ bool ParseMySQLFlagsBasedServerConfigOrDie(
   config->set_user(user);
   config->set_password(password);
 
+  CHECK(!enable_database_upgrade || downgrade_db_schema_version < 0)
+      << "Both --enable_database_upgraded=true and downgrade_db_schema_version "
+         ">= 0 cannot be set together. Only one of the flags needs to be set";
+
+  if (enable_database_upgrade) {
+    ml_metadata::MigrationOptions* migration_config =
+        server_config->mutable_migration_options();
+    migration_config->set_enable_upgrade_migration(enable_database_upgrade);
+  }
+
+  if (downgrade_db_schema_version >= 0) {
+    ml_metadata::MigrationOptions* migration_config =
+        server_config->mutable_migration_options();
+    migration_config->set_downgrade_to_schema_version(
+        downgrade_db_schema_version);
+  }
+
   return true;
 }
 }  // namespace
@@ -130,6 +150,9 @@ DEFINE_string(metadata_store_server_config_file, "",
               "from the file name to connect to the specified metadata source "
               "and set up a secure gRPC channel. If provided overrides the "
               "--mysql* configuration");
+DEFINE_int32(
+    metadata_store_connection_retries, 5,
+    "The max number of retries when connecting to the given metadata source");
 
 // MySQL config command line options
 DEFINE_string(mysql_config_host, "",
@@ -148,12 +171,20 @@ DEFINE_string(mysql_config_user, "",
               "The mysql user name to use (Optional parameter)");
 DEFINE_string(mysql_config_password, "",
               "The mysql user password to use (Optional parameter)");
+DEFINE_bool(
+    enable_database_upgrade, false,
+    "Flag specifying database upgrade option. If set to true, it enables "
+    "database migration during initialization(Optional parameter");
+DEFINE_int64(downgrade_db_schema_version, -1,
+             "Database downgrade schema version value. If set the database "
+             "schema version is downgraded to the set value during "
+             "initialization(Optional Parameter)");
 
 int main(int argc, char** argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-  if (FLAGS_grpc_port <= 0) {
-    LOG(ERROR) << "grpc_port is invalid: " << FLAGS_grpc_port;
+  if ((FLAGS_grpc_port) <= 0) {
+    LOG(ERROR) << "grpc_port is invalid: " << (FLAGS_grpc_port);
     return -1;
   }
 
@@ -161,11 +192,16 @@ int main(int argc, char** argv) {
   ml_metadata::ConnectionConfig connection_config;
 
   if (!ParseMetadataStoreServerConfigOrDie(
-          FLAGS_metadata_store_server_config_file, &server_config) &&
+          (FLAGS_metadata_store_server_config_file),
+          &server_config) &&
       !ParseMySQLFlagsBasedServerConfigOrDie(
-          FLAGS_mysql_config_host, FLAGS_mysql_config_port,
-          FLAGS_mysql_config_database, FLAGS_mysql_config_user,
-          FLAGS_mysql_config_password, &server_config)) {
+          (FLAGS_mysql_config_host),
+          (FLAGS_mysql_config_port),
+          (FLAGS_mysql_config_database),
+          (FLAGS_mysql_config_user),
+          (FLAGS_mysql_config_password),
+          (FLAGS_enable_database_upgrade),
+          (FLAGS_downgrade_db_schema_version), &server_config)) {
     LOG(WARNING) << "The connection_config is not given. Using in memory fake "
                     "database, any metadata will not be persistent";
     connection_config.mutable_fake_database();
@@ -173,15 +209,30 @@ int main(int argc, char** argv) {
     connection_config = server_config.connection_config();
   }
 
+  // Creates a metadata_store in the main thread and init schema if necessary.
   std::unique_ptr<ml_metadata::MetadataStore> metadata_store;
-  TF_CHECK_OK(ml_metadata::CreateMetadataStore(
-      connection_config, server_config.migration_options(), &metadata_store))
+  tensorflow::Status status = ml_metadata::CreateMetadataStore(
+      connection_config, server_config.migration_options(), &metadata_store);
+  for (int i = 0; i < (FLAGS_metadata_store_connection_retries);
+       i++) {
+    if (status.ok() || !tensorflow::errors::IsAborted(status)) {
+      break;
+    }
+    LOG(WARNING) << "Connection Aborted with error: " << status;
+    LOG(INFO) << "Retry attempt " << i;
+    status = ml_metadata::CreateMetadataStore(
+        connection_config, server_config.migration_options(), &metadata_store);
+  }
+  TF_CHECK_OK(status)
       << "MetadataStore cannot be created with the given connection config.";
+  // At this point, schema initialization and migration are done.
+  metadata_store.reset();
 
   ml_metadata::MetadataStoreServiceImpl metadata_store_service(
-      std::move(metadata_store));
+      connection_config);
 
-  const string server_address = absl::StrCat("0.0.0.0:", FLAGS_grpc_port);
+  const string server_address =
+      absl::StrCat("0.0.0.0:", (FLAGS_grpc_port));
   ::grpc::ServerBuilder builder;
 
   std::shared_ptr<::grpc::ServerCredentials> credentials =
@@ -191,7 +242,7 @@ int main(int argc, char** argv) {
   }
 
   builder.AddListeningPort(server_address, credentials);
-  AddGrpcChannelArgs(FLAGS_grpc_channel_arguments, &builder);
+  AddGrpcChannelArgs((FLAGS_grpc_channel_arguments), &builder);
   builder.RegisterService(&metadata_store_service);
   std::unique_ptr<::grpc::Server> server(builder.BuildAndStart());
   LOG(INFO) << "Server listening on " << server_address;

@@ -13,13 +13,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include "ml_metadata/metadata_store/metadata_store_factory.h"
-#include "ml_metadata/metadata_store/metadata_store.h"
 
 #include <memory>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+
 #include "ml_metadata/metadata_store/metadata_access_object.h"
+#include "ml_metadata/metadata_store/metadata_store.h"
 #include "ml_metadata/metadata_store/test_util.h"
 #include "ml_metadata/proto/metadata_source.pb.h"
 #include "ml_metadata/proto/metadata_store.pb.h"
@@ -57,9 +58,9 @@ void TestPutAndGetArtifactType(const ConnectionConfig& connection_config) {
           )");
   GetArtifactTypeResponse get_response;
   TF_ASSERT_OK(store->GetArtifactType(get_request, &get_response));
-  ArtifactType expected = put_request.artifact_type();
-  expected.set_id(put_response.type_id());
-  EXPECT_THAT(get_response.artifact_type(), testing::EqualsProto(expected))
+  EXPECT_THAT(get_response.artifact_type(),
+              testing::EqualsProto(put_request.artifact_type(),
+                                   /*ignore_fields=*/{"id"}))
       << "The type should be the same as the one given.";
 }
 

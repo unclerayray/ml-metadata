@@ -18,10 +18,12 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/types/optional.h"
+#include "absl/types/span.h"
 #include "ml_metadata/metadata_store/metadata_source.h"
 #include "ml_metadata/proto/metadata_source.pb.h"
 #include "ml_metadata/proto/metadata_store.pb.h"
-#include "tensorflow/core/lib/core/status.h"
 
 namespace ml_metadata {
 
@@ -41,42 +43,27 @@ namespace ml_metadata {
 //    SomeConcreteMetadataSource src;
 //    MetadataSourceQueryConfig config;
 //    std::unique_ptr<MetadataAccessObject> mao;
-//    TF_CHECK_OK(MetadataAccessObject::Create(config, &src, &mao));
+//    CHECK_EQ(absl::OkStatus(), CreateMetadataAccessObject(config, &src,
+//    &mao));
 //
 //    if (mao->SomeCRUDMethod(...).ok())
-//      TF_CHECK_OK(src.Commit()); // or do more queries
+//      CHECK_EQ(absl::OkStatus(), src.Commit()); // or do more queries
 //    else
-//      TF_CHECK_OK(src.Rollback());
+//      CHECK_EQ(absl::OkStatus(), src.Rollback());
 //
-// TODO(huimiao) Refactor it to be an abstract interface when the CRUD methods
-// are more stable. Having an abstract interface allows
-//   a) alternative RDBMS schema designs
-//   b) non-SQL backend
-//   c) easier to test
 class MetadataAccessObject {
  public:
-  // Factory method, if the return value is ok, 'result' is populated with an
-  // object that can be used to access metadata with the given config and
-  // metadata_source. The caller is responsible to own a MetadataSource, and the
-  // MetadataAccessObject connects and execute queries with the MetadataSource.
-  // Returns INVALID_ARGUMENT error, if query_config is not valid.
-  // Returns detailed INTERNAL error, if the MetadataSource cannot be connected.
-  static tensorflow::Status Create(
-      const MetadataSourceQueryConfig& query_config,
-      MetadataSource* metadata_source,
-      std::unique_ptr<MetadataAccessObject>* result);
-
-  ~MetadataAccessObject() = default;
+  virtual ~MetadataAccessObject() = default;
 
   // default & copy constructors are disallowed.
-  MetadataAccessObject() = delete;
+  MetadataAccessObject() = default;
   MetadataAccessObject(const MetadataAccessObject&) = delete;
   MetadataAccessObject& operator=(const MetadataAccessObject&) = delete;
 
   // Initializes the metadata source and creates schema. Any existing data in
   // the MetadataSource is dropped.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status InitMetadataSource();
+  virtual absl::Status InitMetadataSource() = 0;
 
   // Initializes the metadata source and creates schema.
   // Returns OK and does nothing, if all required schema exist.
@@ -86,8 +73,8 @@ class MetadataAccessObject {
   // Returns FAILED_PRECONDITION error, if library and db have incompatible
   //   schema versions, and upgrade migrations are not enabled.
   // Returns detailed INTERNAL error, if create schema query execution fails.
-  tensorflow::Status InitMetadataSourceIfNotExists(
-      bool enable_upgrade_migration = false);
+  virtual absl::Status InitMetadataSourceIfNotExists(
+      bool enable_upgrade_migration = false) = 0;
 
   // Downgrades the schema to `to_schema_version` in the given metadata source.
   // Returns INVALID_ARGUMENT, if `to_schema_version` is less than 0, or newer
@@ -95,7 +82,7 @@ class MetadataAccessObject {
   // Returns FAILED_PRECONDITION, if db schema version is newer than the
   //   library version.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status DowngradeMetadataSource(int64 to_schema_version);
+  virtual absl::Status DowngradeMetadataSource(int64 to_schema_version) = 0;
 
   // Creates a type, returns the assigned type id. A type is one of
   // {ArtifactType, ExecutionType, ContextType}. The id field of the given type
@@ -103,9 +90,10 @@ class MetadataAccessObject {
   // Returns INVALID_ARGUMENT error, if name field is not given.
   // Returns INVALID_ARGUMENT error, if any property type is unknown.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status CreateType(const ArtifactType& type, int64* type_id);
-  tensorflow::Status CreateType(const ExecutionType& type, int64* type_id);
-  tensorflow::Status CreateType(const ContextType& type, int64* type_id);
+  virtual absl::Status CreateType(const ArtifactType& type, int64* type_id) = 0;
+  virtual absl::Status CreateType(const ExecutionType& type,
+                                  int64* type_id) = 0;
+  virtual absl::Status CreateType(const ContextType& type, int64* type_id) = 0;
 
   // Updates an existing type. A type is one of {ArtifactType, ExecutionType,
   // ContextType}. The update should be backward compatible, i.e., existing
@@ -116,36 +104,65 @@ class MetadataAccessObject {
   // Returns INVALID_ARGUMENT error, if any property type is unknown.
   // Returns ALREADY_EXISTS error, if any property type is different.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status UpdateType(const ArtifactType& type);
-  tensorflow::Status UpdateType(const ExecutionType& type);
-  tensorflow::Status UpdateType(const ContextType& type);
+  virtual absl::Status UpdateType(const ArtifactType& type) = 0;
+  virtual absl::Status UpdateType(const ExecutionType& type) = 0;
+  virtual absl::Status UpdateType(const ContextType& type) = 0;
 
   // Queries a type by an id. A type is one of
   // {ArtifactType, ExecutionType, ContextType}
   // Returns NOT_FOUND error, if the given type_id cannot be found.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindTypeById(int64 type_id, ArtifactType* artifact_type);
-  tensorflow::Status FindTypeById(int64 type_id, ExecutionType* execution_type);
-  tensorflow::Status FindTypeById(int64 type_id, ContextType* context_type);
+  virtual absl::Status FindTypeById(int64 type_id,
+                                    ArtifactType* artifact_type) = 0;
+  virtual absl::Status FindTypeById(int64 type_id,
+                                    ExecutionType* execution_type) = 0;
+  virtual absl::Status FindTypeById(int64 type_id,
+                                    ContextType* context_type) = 0;
 
-  // Queries a type by its name. A type is one of
-  // {ArtifactType, ExecutionType, ContextType}
-  // Returns NOT_FOUND error, if the given name cannot be found.
+  // Queries a type by its name and version. A type is one of
+  // {ArtifactType, ExecutionType, ContextType}. The type version is optional.
+  // If not given or the version is an empty string, the type with
+  // (name, version = NULL) is returned.
+  // Returns NOT_FOUND error, if the given name, version cannot be found.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindTypeByName(absl::string_view name,
-                                    ArtifactType* artifact_type);
-  tensorflow::Status FindTypeByName(absl::string_view name,
-                                    ExecutionType* execution_type);
-  tensorflow::Status FindTypeByName(absl::string_view name,
-                                    ContextType* context_type);
+  virtual absl::Status FindTypeByNameAndVersion(
+      absl::string_view name, absl::optional<absl::string_view> version,
+      ArtifactType* artifact_type) = 0;
+  virtual absl::Status FindTypeByNameAndVersion(
+      absl::string_view name, absl::optional<absl::string_view> version,
+      ExecutionType* execution_type) = 0;
+  virtual absl::Status FindTypeByNameAndVersion(
+      absl::string_view name, absl::optional<absl::string_view> version,
+      ContextType* context_type) = 0;
 
   // Returns a list of all known type instances. A type is one of
   // {ArtifactType, ExecutionType, ContextType}
   // Returns NOT_FOUND error, if no types can be found.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindTypes(std::vector<ArtifactType>* artifact_types);
-  tensorflow::Status FindTypes(std::vector<ExecutionType>* execution_types);
-  tensorflow::Status FindTypes(std::vector<ContextType>* context_types);
+  virtual absl::Status FindTypes(std::vector<ArtifactType>* artifact_types) = 0;
+  virtual absl::Status FindTypes(
+      std::vector<ExecutionType>* execution_types) = 0;
+  virtual absl::Status FindTypes(std::vector<ContextType>* context_types) = 0;
+
+  // Creates a parent type, returns OK if successful.
+  // Returns INVALID_ARGUMENT error, if type or parent_type does not have id.
+  // Returns INVALID_ARGUMENT error, if type and parent_type introduces cycle.
+  // Returns ALREADY_EXISTS error, if the same ParentType record already exists.
+  virtual absl::Status CreateParentTypeInheritanceLink(
+      const ArtifactType& type, const ArtifactType& parent_type) = 0;
+  virtual absl::Status CreateParentTypeInheritanceLink(
+      const ExecutionType& type, const ExecutionType& parent_type) = 0;
+  virtual absl::Status CreateParentTypeInheritanceLink(
+      const ContextType& type, const ContextType& parent_type) = 0;
+
+  // Queries the parent types of a type_id.
+  // Returns NOT_FOUND error, if the given type_id is missing.
+  virtual absl::Status FindParentTypesByTypeId(
+      int64 type_id, std::vector<ArtifactType>& output_parent_types) = 0;
+  virtual absl::Status FindParentTypesByTypeId(
+      int64 type_id, std::vector<ExecutionType>& output_parent_types) = 0;
+  virtual absl::Status FindParentTypesByTypeId(
+      int64 type_id, std::vector<ContextType>& output_parent_types) = 0;
 
   // Creates an artifact, returns the assigned artifact id. The id field of the
   // artifact is ignored.
@@ -155,30 +172,93 @@ class MetadataAccessObject {
   //  undefined in the type.
   // Returns INVALID_ARGUMENT error, if given value of a property does not match
   //   with its data type definition in the artifact type.
+  // Returns ALREADY_EXISTS error, if the ArtifactType has artifact with the
+  // same name.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status CreateArtifact(const Artifact& artifact,
-                                    int64* artifact_id);
+  virtual absl::Status CreateArtifact(const Artifact& artifact,
+                                      int64* artifact_id) = 0;
 
-  // Queries an artifact by an id.
-  // Returns NOT_FOUND error, if the given artifact_id cannot be found.
+  // Retrieves artifacts matching the given 'artifact_ids'.
+  // Returns NOT_FOUND error, if any of the given artifact_ids are not found.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindArtifactById(int64 artifact_id, Artifact* artifact);
+  virtual absl::Status FindArtifactsById(absl::Span<const int64> artifact_ids,
+                                         std::vector<Artifact>* artifact) = 0;
 
   // Queries artifacts stored in the metadata source
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindArtifacts(std::vector<Artifact>* artifacts);
+  virtual absl::Status FindArtifacts(std::vector<Artifact>* artifacts) = 0;
+
+  // Queries artifacts stored in the metadata source using `options`.
+  // `options` is the ListOperationOptions proto message defined
+  // in metadata_store.
+  // If successfull:
+  // 1. `artifacts` is updated with result set of size determined by
+  //    max_result_size set in `options`.
+  // 2. `next_page_token` is populated with information necessary to fetch next
+  //    page of results.
+  // An empty result set is returned if no artifacts are retrieved.
+  // RETURNS INVALID_ARGUMENT if the `options` is invalid with one of
+  //    the cases:
+  // 1. order_by_field is not set or has an unspecified field.
+  // 2. Direction of ordering is not specified for the order_by_field.
+  // 3. next_page_token cannot be decoded.
+  virtual absl::Status ListArtifacts(const ListOperationOptions& options,
+                                     std::vector<Artifact>* artifacts,
+                                     std::string* next_page_token) = 0;
+
+  // Queries executions stored in the metadata source using `options`.
+  // `options` is the ListOperationOptions proto message defined
+  // in metadata_store.
+  // If successfull:
+  // 1. `executions` is updated with result set of size determined by
+  //    max_result_size set in `options`.
+  // 2. `next_page_token` is populated with information necessary to fetch next
+  //    page of results.
+  // An empty result set is returned if no executions are retrieved.
+  // RETURNS INVALID_ARGUMENT if the `options` is invalid with one of
+  //    the cases:
+  // 1. order_by_field is not set or has an unspecified field.
+  // 2. Direction of ordering is not specified for the order_by_field.
+  // 3. next_page_token cannot be decoded.
+  virtual absl::Status ListExecutions(const ListOperationOptions& options,
+                                      std::vector<Execution>* executions,
+                                      std::string* next_page_token) = 0;
+
+  // Queries contexts stored in the metadata source using `options`.
+  // `options` is the ListOperationOptions proto message defined
+  // in metadata_store.
+  // If successfull:
+  // 1. `contexts` is updated with result set of size determined by
+  //    max_result_size set in `options`.
+  // 2. `next_page_token` is populated with information necessary to fetch next
+  //    page of results.
+  // An empty result set is returned if no contexts are retrieved.
+  // RETURNS INVALID_ARGUMENT if the `options` is invalid with one of
+  //    the cases:
+  // 1. order_by_field is not set or has an unspecified field.
+  // 2. Direction of ordering is not specified for the order_by_field.
+  // 3. next_page_token cannot be decoded.
+  virtual absl::Status ListContexts(const ListOperationOptions& options,
+                                    std::vector<Context>* contexts,
+                                    std::string* next_page_token) = 0;
+
+  // Queries an artifact by its type_id and name.
+  // Returns NOT_FOUND error, if no artifact can be found.
+  // Returns detailed INTERNAL error, if query execution fails.
+  virtual absl::Status FindArtifactByTypeIdAndArtifactName(
+      int64 artifact_type_id, absl::string_view name, Artifact* artifact) = 0;
 
   // Queries artifacts by a given type_id.
   // Returns NOT_FOUND error, if the given artifact_type_id cannot be found.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindArtifactsByTypeId(int64 artifact_type_id,
-                                           std::vector<Artifact>* artifacts);
+  virtual absl::Status FindArtifactsByTypeId(
+      int64 artifact_type_id, std::vector<Artifact>* artifacts) = 0;
 
   // Queries artifacts by a given uri with exact match.
   // Returns NOT_FOUND error, if the given uri cannot be found.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindArtifactsByURI(absl::string_view uri,
-                                        std::vector<Artifact>* artifacts);
+  virtual absl::Status FindArtifactsByURI(absl::string_view uri,
+                                          std::vector<Artifact>* artifacts) = 0;
 
   // Updates an artifact.
   // Returns INVALID_ARGUMENT error, if the id field is not given.
@@ -188,7 +268,7 @@ class MetadataAccessObject {
   // Returns INVALID_ARGUMENT error, if given property names and types do not
   // align with the ArtifactType on file.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status UpdateArtifact(const Artifact& artifact);
+  virtual absl::Status UpdateArtifact(const Artifact& artifact) = 0;
 
   // Creates an execution, returns the assigned execution id. The id field of
   // the execution is ignored.
@@ -198,25 +278,35 @@ class MetadataAccessObject {
   //   undefined in the type.
   // Returns INVALID_ARGUMENT error, if given value of a property does not match
   //   with its data type definition in the ExecutionType.
+  // Returns ALREADY_EXISTS error, if the ExecutionType has execution with the
+  // same name.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status CreateExecution(const Execution& execution,
-                                     int64* execution_id);
+  virtual absl::Status CreateExecution(const Execution& execution,
+                                       int64* execution_id) = 0;
 
-  // Queries an entity by an id.
-  // Returns NOT_FOUND error, if the given execution_id cannot be found.
+  // Retrieves executions matching the given 'ids'.
+  // Returns NOT_FOUND error, if any of the given ids are not found.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindExecutionById(int64 execution_id,
-                                       Execution* execution);
+  virtual absl::Status FindExecutionsById(
+      absl::Span<const int64> execution_ids,
+      std::vector<Execution>* executions) = 0;
 
   // Queries executions stored in the metadata source
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindExecutions(std::vector<Execution>* executions);
+  virtual absl::Status FindExecutions(std::vector<Execution>* executions) = 0;
+
+  // Queries an execution by its type_id and name.
+  // Returns NOT_FOUND error, if no execution can be found.
+  // Returns detailed INTERNAL error, if query execution fails.
+  virtual absl::Status FindExecutionByTypeIdAndExecutionName(
+      int64 execution_type_id, absl::string_view name,
+      Execution* execution) = 0;
 
   // Queries executions by a given type_id.
   // Returns NOT_FOUND error, if the given execution_type_id cannot be found.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindExecutionsByTypeId(int64 execution_type_id,
-                                            std::vector<Execution>* executions);
+  virtual absl::Status FindExecutionsByTypeId(
+      int64 execution_type_id, std::vector<Execution>* executions) = 0;
 
   // Updates an execution.
   // Returns INVALID_ARGUMENT error, if the id field is not given.
@@ -226,7 +316,7 @@ class MetadataAccessObject {
   // Returns INVALID_ARGUMENT error, if given property names and types do not
   // align with the ExecutionType on file.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status UpdateExecution(const Execution& execution);
+  virtual absl::Status UpdateExecution(const Execution& execution) = 0;
 
   // Creates a context, returns the assigned context id. The id field of the
   // context is ignored. The name field of the context must not be empty and it
@@ -240,22 +330,32 @@ class MetadataAccessObject {
   //   with its data type definition in the context type.
   // Returns ALREADY_EXISTS error, if the ContextType has context with the name.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status CreateContext(const Context& context, int64* context_id);
+  virtual absl::Status CreateContext(const Context& context,
+                                     int64* context_id) = 0;
 
-  // Queries a context by an id.
-  // Returns NOT_FOUND error, if the given context_id cannot be found.
-  // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindContextById(int64 context_id, Context* context);
+  // Retrieves contexts matching a collection of ids.
+  // Returns NOT_FOUND if any of the given ids are not found.
+  // Returns detailed INTERNAL error if query execution fails.
+  virtual absl::Status FindContextsById(absl::Span<const int64> context_ids,
+                                        std::vector<Context>* context) = 0;
 
   // Queries contexts stored in the metadata source
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindContexts(std::vector<Context>* contexts);
+  virtual absl::Status FindContexts(std::vector<Context>* contexts) = 0;
 
   // Queries contexts by a given type_id.
-  // Returns NOT_FOUND error, if the given context_type_id cannot be found.
+  // Returns NOT_FOUND error, if no context can be found.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status FindContextsByTypeId(int64 context_type_id,
-                                          std::vector<Context>* contexts);
+  virtual absl::Status FindContextsByTypeId(
+      int64 type_id, absl::optional<ListOperationOptions> list_options,
+      std::vector<Context>* contexts, std::string* next_page_token) = 0;
+
+  // Queries a context by a type_id and a context name.
+  // Returns NOT_FOUND error, if no context can be found.
+  // Returns detailed INTERNAL error, if query execution fails.
+  virtual absl::Status FindContextByTypeIdAndContextName(int64 type_id,
+                                                         absl::string_view name,
+                                                         Context* context) = 0;
 
   // Updates a context.
   // Returns INVALID_ARGUMENT error, if the id field is not given.
@@ -265,7 +365,7 @@ class MetadataAccessObject {
   // Returns INVALID_ARGUMENT error, if given property names and types do not
   // align with the ContextType on file.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status UpdateContext(const Context& context);
+  virtual absl::Status UpdateContext(const Context& context) = 0;
 
   // Creates an event, returns the assigned event id. If the event occurrence
   // time is not given, the insertion time is used.
@@ -273,53 +373,86 @@ class MetadataAccessObject {
   // Returns INVALID_ARGUMENT error, if no artifact matches the artifact_id.
   // Returns INVALID_ARGUMENT error, if no execution matches the execution_id.
   // Returns INVALID_ARGUMENT error, if the type field is UNKNOWN.
-  tensorflow::Status CreateEvent(const Event& event, int64* event_id);
+  virtual absl::Status CreateEvent(const Event& event, int64* event_id) = 0;
 
-  // Queries the events associated with an artifact_id.
+  // Queries the events associated with a collection of artifact_ids.
+  // Returns NOT_FOUND error, if no `events` can be found.
   // Returns INVALID_ARGUMENT error, if the `events` is null.
-  // Returns NOT_FOUND error, if there are no events found with the `artifact`.
-  tensorflow::Status FindEventsByArtifact(int64 artifact_id,
-                                          std::vector<Event>* events);
+  virtual absl::Status FindEventsByArtifacts(
+      const std::vector<int64>& artifact_ids, std::vector<Event>* events) = 0;
 
-  // Queries the events associated with an execution_id.
+  // Queries the events associated with a collection of execution_ids.
+  // Returns NOT_FOUND error, if no `events` can be found.
   // Returns INVALID_ARGUMENT error, if the `events` is null.
-  // Returns NOT_FOUND error, if there are no events found with the `execution`.
-  tensorflow::Status FindEventsByExecution(int64 execution_id,
-                                           std::vector<Event>* events);
+  virtual absl::Status FindEventsByExecutions(
+      const std::vector<int64>& execution_ids, std::vector<Event>* events) = 0;
 
   // Creates an association, returns the assigned association id.
   // Returns INVALID_ARGUMENT error, if no context matches the context_id.
   // Returns INVALID_ARGUMENT error, if no execution matches the execution_id.
-  // Returns INTERNAL error, if the same association already exists.
-  tensorflow::Status CreateAssociation(const Association& association,
-                                       int64* association_id);
+  // Returns ALREADY_EXISTS error, if the same association already exists.
+  virtual absl::Status CreateAssociation(const Association& association,
+                                         int64* association_id) = 0;
 
   // Queries the contexts that an execution_id is associated with.
   // Returns INVALID_ARGUMENT error, if the `contexts` is null.
-  tensorflow::Status FindContextsByExecution(int64 execution_id,
-                                             std::vector<Context>* contexts);
+  virtual absl::Status FindContextsByExecution(
+      int64 execution_id, std::vector<Context>* contexts) = 0;
 
   // Queries the executions associated with a context_id.
   // Returns INVALID_ARGUMENT error, if the `executions` is null.
-  tensorflow::Status FindExecutionsByContext(
-      int64 context_id, std::vector<Execution>* executions);
+  virtual absl::Status FindExecutionsByContext(
+      int64 context_id, std::vector<Execution>* executions) = 0;
+
+  // Queries the executions associated with a context_id.
+  // Returns INVALID_ARGUMENT error, if the `executions` is null.
+  virtual absl::Status FindExecutionsByContext(
+      int64 context_id, absl::optional<ListOperationOptions> list_options,
+      std::vector<Execution>* executions, std::string* next_page_token) = 0;
 
   // Creates an attribution, returns the assigned attribution id.
   // Returns INVALID_ARGUMENT error, if no context matches the context_id.
   // Returns INVALID_ARGUMENT error, if no artifact matches the artifact_id.
-  // Returns INTERNAL error, if the same attribution already exists.
-  tensorflow::Status CreateAttribution(const Attribution& attribution,
-                                       int64* attribution_id);
+  // Returns ALREADY_EXISTS error, if the same attribution already exists.
+  virtual absl::Status CreateAttribution(const Attribution& attribution,
+                                         int64* attribution_id) = 0;
 
   // Queries the contexts that an artifact_id is attributed to.
   // Returns INVALID_ARGUMENT error, if the `contexts` is null.
-  tensorflow::Status FindContextsByArtifact(int64 artifact_id,
-                                            std::vector<Context>* contexts);
+  virtual absl::Status FindContextsByArtifact(
+      int64 artifact_id, std::vector<Context>* contexts) = 0;
 
   // Queries the artifacts attributed to a context_id.
   // Returns INVALID_ARGUMENT error, if the `artifacts` is null.
-  tensorflow::Status FindArtifactsByContext(int64 context_id,
-                                            std::vector<Artifact>* artifacts);
+  virtual absl::Status FindArtifactsByContext(
+      int64 context_id, std::vector<Artifact>* artifacts) = 0;
+
+  // Queries the artifacts attributed to a context_id.
+  // If `list_options` is specified then results are paginated based on the
+  // fields set in `list_options`.
+  // Returns INVALID_ARGUMENT error, if the `artifacts` is null.
+  virtual absl::Status FindArtifactsByContext(
+      int64 context_id, absl::optional<ListOperationOptions> list_options,
+      std::vector<Artifact>* artifacts, std::string* next_page_token) = 0;
+
+  // Creates a parent context, returns OK if succeeds.
+  // Returns INVALID_ARGUMENT error, if no context matches the child_id.
+  // Returns INVALID_ARGUMENT error, if no context matches the parent_id.
+  // Returns ALREADY_EXISTS error, if the same parent context already exists.
+  // TODO(b/155207795) Consider ParentContext transitive closure check when
+  // inserting a new record.
+  virtual absl::Status CreateParentContext(
+      const ParentContext& parent_context) = 0;
+
+  // Queries the parent-contexts of a context_id.
+  // Returns INVALID_ARGUMENT error, if the `contexts` is null.
+  virtual absl::Status FindParentContextsByContextId(
+      int64 context_id, std::vector<Context>* contexts) = 0;
+
+  // Queries the child-contexts of a context_id.
+  // Returns INVALID_ARGUMENT error, if the `contexts` is null.
+  virtual absl::Status FindChildContextsByContextId(
+      int64 context_id, std::vector<Context>* contexts) = 0;
 
   // Resolves the schema version stored in the metadata source. The `db_version`
   // is set to 0, if it is a 0.13.2 release pre-existing database.
@@ -327,38 +460,17 @@ class MetadataAccessObject {
   //   cannot be resolved from the database.
   // Returns NOT_FOUND error, if the database is empty.
   // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status GetSchemaVersion(int64* db_version);
+  virtual absl::Status GetSchemaVersion(int64* db_version) = 0;
 
-  MetadataSource* metadata_source() { return metadata_source_; }
+  // The version of the current query config or source. Increase the version by
+  // 1 in any CL that includes physical schema changes and provides a migration
+  // function that uses a list migration queries. The database stores it to
+  // indicate the current database version. When metadata source is connected to
+  // the database it can compare the given library `schema_version` in the query
+  // config with the `schema_version` stored in the database, and migrate the
+  // database if needed.
+  virtual int64 GetLibraryVersion() = 0;
 
-  MetadataSourceQueryConfig query_config() { return query_config_; }
-
- private:
-  // Constructs a MetadataAccessObject with a query config and a connected
-  // MetadataSource.
-  explicit MetadataAccessObject(const MetadataSourceQueryConfig& query_config,
-                                MetadataSource* connected_metadata_source);
-
-  // Upgrades the database schema version (db_v) to align with the library
-  // schema version (lib_v). It retrieves db_v from the metadata source and
-  // compares it with the lib_v in the given query_config, and runs migration
-  // queries if db_v < lib_v. If `disable_migration`, it only compares the
-  // db_v with lib_v and does not change the db schema.
-  // Returns FAILED_PRECONDITION error, if db_v > lib_v for the case that the
-  //   user use a database produced by a newer version of the library. In that
-  //   case, downgrading the database may result in data loss. Often upgrading
-  //   the library is required.
-  // Returns FAILED_PRECONDITION error, if db_v < lib_v and `disable_migration`
-  //   is set to true.
-  // Returns DATA_LOSS error, if schema version table exists but no value found.
-  // Returns DATA_LOSS error, if the database is not a 0.13.2 release database
-  //   and the schema version cannot be resolved.
-  // Returns detailed INTERNAL error, if query execution fails.
-  tensorflow::Status UpgradeMetadataSourceIfOutOfDate(bool disable_migration);
-
-  const MetadataSourceQueryConfig query_config_;
-
-  MetadataSource* const metadata_source_;
 };
 
 }  // namespace ml_metadata

@@ -14,14 +14,17 @@ limitations under the License.
 ==============================================================================*/
 #include "ml_metadata/metadata_store/sqlite_metadata_source.h"
 
+#include <random>
+
+#include <glog/logging.h>
+#include "absl/status/status.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "ml_metadata/metadata_store/sqlite_metadata_source_util.h"
 #include "ml_metadata/proto/metadata_store.pb.h"
 #include "sqlite3.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/status.h"
 
 namespace ml_metadata {
 
@@ -58,30 +61,36 @@ int GetConnectionFlag(const SqliteMetadataSourceConfig& config) {
 // A set of options when waiting for table locks in a sqlite3_busy_handler.
 // see WaitThenRetry for details.
 struct WaitThenRetryOptions {
-  // the wait time in milliseconds
-  absl::Duration sleep_time;
-  // the max time to wait for a single lock
-  absl::Duration max_retried_time;
+  // the min wait time in milliseconds.
+  absl::Duration min_sleep_time;
+  // the max wait time in milliseconds.
+  absl::Duration max_sleep_time;
+  // the max number of retries.
+  int max_num_retries;
 };
 
 // A callback of sqlite3_busy_handler. Concurrent access to a table may prevent
 // query to proceed, the callback returns zero to continue waiting, and non-zero
 // to abort the query and returns a SQLITE_BUSY error. The function takes a
 // WaitThenRetryOptions (`options`), waits for a lock and then indicates sqlite3
-// to retry. The default values for sleep is 100 millisecond (`sleep_time`)
-// for each wait and 5 times at maximum (`max_retried_time`/`sleep_time`).
-// (see https://www.sqlite.org/c3ref/busy_handler.html for details)
+// to retry. The default sleep time mean is 200 millisecond and sleep 10 times
+// at maximum (see https://www.sqlite.org/c3ref/busy_handler.html for details).
 int WaitThenRetry(void* options, int retried_times) {
   static constexpr WaitThenRetryOptions kDefaultWaitThenRetryOptions = {
-      absl::Milliseconds(100), absl::Milliseconds(500)};
+      absl::Milliseconds(100), absl::Milliseconds(300), 10};
   const WaitThenRetryOptions* opts =
       (options != nullptr) ? static_cast<WaitThenRetryOptions*>(options)
                            : &kDefaultWaitThenRetryOptions;
   // aborts the query with SQLITE_BUSY
-  if (retried_times >= opts->max_retried_time / opts->sleep_time) {
+  if (retried_times >= opts->max_num_retries) {
     return 0;
   }
-  absl::SleepFor(opts->sleep_time);
+  std::minstd_rand0 gen(absl::ToUnixMillis(absl::Now()));
+  std::uniform_int_distribution<int64> uniform_dist(
+      opts->min_sleep_time / absl::Milliseconds(1),
+      opts->max_sleep_time / absl::Milliseconds(1));
+  const absl::Duration sleep_time = absl::Milliseconds(uniform_dist(gen));
+  absl::SleepFor(sleep_time);
   // allow further retry
   return 1;
 }
@@ -98,69 +107,71 @@ SqliteMetadataSource::SqliteMetadataSource(
         SqliteMetadataSourceConfig::READWRITE_OPENCREATE);
 }
 
-SqliteMetadataSource::~SqliteMetadataSource() { TF_CHECK_OK(CloseImpl()); }
+SqliteMetadataSource::~SqliteMetadataSource() {
+  CHECK_EQ(absl::OkStatus(), CloseImpl());
+}
 
-tensorflow::Status SqliteMetadataSource::ConnectImpl() {
+absl::Status SqliteMetadataSource::ConnectImpl() {
   if (sqlite3_open_v2(config_.filename_uri().c_str(), &db_,
                       GetConnectionFlag(config_), nullptr) != SQLITE_OK) {
-    string error_message = sqlite3_errmsg(db_);
+    std::string error_message = sqlite3_errmsg(db_);
     sqlite3_close(db_);
     db_ = nullptr;
-    return tensorflow::errors::Internal("Cannot connect sqlite3 database: ",
-                                        error_message);
+    return absl::InternalError(
+        absl::StrCat("Cannot connect sqlite3 database: ", error_message));
   }
   // required to handle cases when tables are locked when executing queries
   sqlite3_busy_handler(db_, &WaitThenRetry, nullptr);
-  return tensorflow::Status::OK();
+  return absl::OkStatus();
 }
 
-tensorflow::Status SqliteMetadataSource::CloseImpl() {
+absl::Status SqliteMetadataSource::CloseImpl() {
   if (db_ != nullptr) {
     int error_code = sqlite3_close(db_);
     if (error_code != SQLITE_OK) {
-      return tensorflow::errors::Internal(
+      return absl::InternalError(
           absl::StrCat("Cannot close sqlite3 database: ", error_code));
     }
     db_ = nullptr;
   }
-  return tensorflow::Status::OK();
+  return absl::OkStatus();
 }
 
-tensorflow::Status SqliteMetadataSource::RunStatement(
-    const string& query, RecordSet* results = nullptr) {
+absl::Status SqliteMetadataSource::RunStatement(const std::string& query,
+                                                RecordSet* results = nullptr) {
   char* error_message;
   if (sqlite3_exec(db_, query.c_str(), &ConvertSqliteResultsToRecordSet,
                    results, &error_message) != SQLITE_OK) {
-    string error_details = error_message;
+    std::string error_details = error_message;
     sqlite3_free(error_message);
     if (absl::StrContains(error_details, "database is locked")) {
-      return tensorflow::errors::Aborted(
+      return absl::AbortedError(
           "Concurrent writes aborted after max number of retries.");
     }
-    return tensorflow::errors::Internal(
-        "Error when executing query: ", error_details, " query: ", query);
+    return absl::InternalError(absl::StrCat(
+        "Error when executing query: ", error_details, " query: ", query));
   }
-  return tensorflow::Status::OK();
+  return absl::OkStatus();
 }
 
-tensorflow::Status SqliteMetadataSource::ExecuteQueryImpl(const string& query,
-                                                          RecordSet* results) {
+absl::Status SqliteMetadataSource::ExecuteQueryImpl(const std::string& query,
+                                                    RecordSet* results) {
   return RunStatement(query, results);
 }
 
-tensorflow::Status SqliteMetadataSource::BeginImpl() {
+absl::Status SqliteMetadataSource::BeginImpl() {
   return RunStatement(kBeginTransaction);
 }
 
-tensorflow::Status SqliteMetadataSource::CommitImpl() {
+absl::Status SqliteMetadataSource::CommitImpl() {
   return RunStatement(kCommitTransaction);
 }
 
-tensorflow::Status SqliteMetadataSource::RollbackImpl() {
+absl::Status SqliteMetadataSource::RollbackImpl() {
   return RunStatement(kRollbackTransaction);
 }
 
-string SqliteMetadataSource::EscapeString(absl::string_view value) const {
+std::string SqliteMetadataSource::EscapeString(absl::string_view value) const {
   return SqliteEscapeString(value);
 }
 

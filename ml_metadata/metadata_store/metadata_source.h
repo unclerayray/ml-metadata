@@ -19,9 +19,9 @@ limitations under the License.
 #include <memory>
 #include <string>
 
+#include "absl/status/status.h"
 #include "ml_metadata/metadata_store/types.h"
 #include "ml_metadata/proto/metadata_source.pb.h"
-#include "tensorflow/core/lib/core/status.h"
 
 namespace ml_metadata {
 
@@ -64,12 +64,12 @@ class MetadataSource {
   // Establishes connection to the physical data source. This method should be
   // called before other methods to store or query metadata from the datasource.
   // Returns FAILED_PRECONDITION error, if calls Connect again without Close.
-  tensorflow::Status Connect();
+  absl::Status Connect();
 
   // Closes any opened connections, and release any resource. After closing a
   // connection, new connections can be opened again.
   // Returns FAILED_PRECONDITION error, if calls Close without a connection.
-  tensorflow::Status Close();
+  absl::Status Close();
 
   // Runs DDL and DML query on data source. If the data source supports
   // transactions, each query is executed within one transaction by default.
@@ -81,115 +81,63 @@ class MetadataSource {
   // Returns FAILED_PRECONDITION error, if Connection() is not opened.
   // Returns detailed INTERNAL error, if query execution fails.
   // Returns FAILED_PRECONDITION error, if a transaction has not begun.
-  tensorflow::Status ExecuteQuery(const string& query, RecordSet* results);
+  absl::Status ExecuteQuery(const std::string& query, RecordSet* results);
 
   // Begins (opens) a transaction.
   // Returns FAILED_PRECONDITION error, if Connection() is not opened.
   // Returns FAILED_PRECONDITION error, if a transaction has already begun.
-  tensorflow::Status Begin();
+  absl::Status Begin();
 
   // Commits a transaction.
   // Returns FAILED_PRECONDITION error, if Connection() is not opened.
   // Returns FAILED_PRECONDITION error, if a transaction has not begun.
   // Returns ABORTED error, if there is a data race detected at commit time.
   // The caller can rollback the transaction, and retry the transaction again.
-  tensorflow::Status Commit();
+  absl::Status Commit();
 
   // Rolls back a transaction. Undoes all uncommitted updates queries, i.e., all
   // DML queries using insert, update, delete are discarded.
   // Returns FAILED_PRECONDITION error, if Connection() is not opened.
   // Returns FAILED_PRECONDITION error, if a transaction has not begun.
-  tensorflow::Status Rollback();
+  absl::Status Rollback();
 
   // Utility method to escape characters specific to the metadata source. The
   // returned string is used to bind text parameters for query composition. The
   // escaping characters and method depends on the metadata source backend.
-  virtual string EscapeString(absl::string_view value) const = 0;
+  virtual std::string EscapeString(absl::string_view value) const = 0;
 
   bool is_connected() const { return is_connected_; }
 
+ protected:
+  bool transaction_open() const { return transaction_open_; }
+
+  void set_transaction_open(bool transaction_open) {
+    transaction_open_ = transaction_open;
+  }
+
  private:
   // Implementation of connecting to a backend.
-  virtual tensorflow::Status ConnectImpl() = 0;
+  virtual absl::Status ConnectImpl() = 0;
 
   // Implementation of closing the current connection.
-  virtual tensorflow::Status CloseImpl() = 0;
+  virtual absl::Status CloseImpl() = 0;
 
   // Implementation of executing queries.
-  virtual tensorflow::Status ExecuteQueryImpl(const string& query,
-                                              RecordSet* results) = 0;
+  virtual absl::Status ExecuteQueryImpl(const std::string& query,
+                                        RecordSet* results) = 0;
 
   // Implementation of opening a transaction.
-  virtual tensorflow::Status BeginImpl() = 0;
+  virtual absl::Status BeginImpl() = 0;
 
   // Implementation of a transaction commit.
-  virtual tensorflow::Status CommitImpl() = 0;
+  virtual absl::Status CommitImpl() = 0;
 
   // Implementation of a transaction rollback.
-  virtual tensorflow::Status RollbackImpl() = 0;
+  virtual absl::Status RollbackImpl() = 0;
 
   bool is_connected_ = false;
   bool transaction_open_ = false;
 };
-
-// A scoped transaction. When it is destroyed, if Commit has not been called,
-// the destructor rolls back the transaction. Commit() should be called exactly
-// once.
-// Usage:
-// MetadataSource my_source = ...;
-// {
-//   ScopedTransaction transaction(&my_source);
-//   my_source.ExecuteQuery(...)
-//   if (...) {
-//     return;  // First transaction rolled back.
-//   }
-//   my_source.ExecuteQuery(...);
-//   transaction.Commit(); // If commit fails, rollback occurs.
-// }
-class ScopedTransaction {
- public:
-  // MetadataSource should outlast the scoped transaction, and should be
-  // connected before the scoped transaction is created.
-  // During the lifetime of the scoped transaction object, the user should
-  // limit calls made directly on the MetadataSource to executions.
-  // The user should not:
-  //   1. Commit() the metadata_source.
-  //   2. Rollback() the metadata_source.
-  //   3. Close() the metadata_source.
-  ScopedTransaction(MetadataSource* metadata_source);
-
-  // If the transaction is not committed, it is rolled back.
-  ~ScopedTransaction();
-
-  // Commit the transaction.
-  // If there is a failure during the commit, the commit_ flag is not
-  // set, resulting in a Rollback().
-  // Should be called no more than once on a transaction.
-  tensorflow::Status Commit();
-
- private:
-  // True iff the transaction has been committed.
-  bool committed_;
-  // Does not own the metadata_source_.
-  // Used for beginning, rolling back, and committing a transaction.
-  MetadataSource* metadata_source_;
-};
-
-// A utility function runs a `transaction`. When the `transaction` returns
-// OK, it calls Commit, otherwise it calls Rollback.
-// Comparing with ScopedTransaction, it always propagates Begin/Commit/Rollback
-// error, whereas ScopedTranscation may have check failures during construction
-// or deconstruction.
-// The caller should own a connected `metadata_source`, and the given
-// `transaction` issues ExecuteQuery with the same `metadata_source`.
-// Similar to ScopedTransaction, MetadataSource::Commit/Rollback/Close should
-// not be called within the `transaction` callback.
-//
-// Returns FAILED_PRECONDITION if metadata_source is null or not connected.
-// Returns detailed internal errors of transaction, Begin, Rollback and Commit.
-tensorflow::Status ExecuteTransaction(
-    MetadataSource* metadata_source,
-    const std::function<tensorflow::Status()>& transaction);
 
 }  // namespace ml_metadata
 

@@ -96,6 +96,8 @@ run_py_tests() {
 set -x
 set -e
 
+cd $MLMD_OUTPUT_DIR
+
 # This script is under <repo_root>/ml_metadata/tools/windows/pip/
 # Change into repository root.
 script_dir=$(dirname $0)
@@ -127,6 +129,18 @@ fi
 "${PYTHON_BIN_PATH}" -m pip install --upgrade pip
 pip install setuptools --upgrade
 pip install wheel --upgrade
+pip install twine --upgrade
+pip install numpy --upgrade
+# There's a tensorflow bazel rule that executes a small piece of code
+# (https://github.com/tensorflow/tensorflow/blob/b36436b087bd8e8701ef51718179037cccdfc26e/third_party/py/python_configure.bzl#L150)
+# to determine the path to python headers and that code doesn't work with
+# setuptools>=50.0 and Python 3.6.1 (which is our testing set up). Setting
+# this environment variable would revert setuptools to the old, good behavior.
+# See https://github.com/pypa/setuptools/issues/2352
+# Note that setuptools 50.0.1 claim to have "fixed" the issue but it
+# did not work for Python 3.6.1 (newer 3.6 may work).
+export SETUPTOOLS_USE_DISTUTILS=stdlib
+
 pip freeze --all
 
 # set up bazel environment before compiling
@@ -134,13 +148,9 @@ export BAZEL_VC="C:/Program Files (x86)/Microsoft Visual Studio 14.0/VC"
 # print environment for debugging
 printenv
 
-bazel run -c opt --define grpc_no_ares=true --verbose_failures ml_metadata:build_pip_package
+"${PYTHON_BIN_PATH}" setup.py bdist_wheel
 
 # Install MLMD.
 pip install dist/*.whl
-pip install ${TENSORFLOW}
 
 run_py_tests "ml_metadata" $@
-
-# copy wheel to ${KOKORO_ARTIFACTS_DIR}
-cp dist/*.whl ${KOKORO_ARTIFACTS_DIR}

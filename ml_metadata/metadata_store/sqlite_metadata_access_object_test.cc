@@ -1,4 +1,4 @@
-/* Copyright 2019 Google LLC
+/* Copyright 2021 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,15 +16,17 @@ limitations under the License.
 
 #include <memory>
 
+#include <glog/logging.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/memory/memory.h"
+#include "absl/status/status.h"
+#include "ml_metadata/metadata_store/metadata_access_object_factory.h"
 #include "ml_metadata/metadata_store/metadata_access_object_test.h"
 #include "ml_metadata/metadata_store/metadata_source.h"
 #include "ml_metadata/metadata_store/sqlite_metadata_source.h"
 #include "ml_metadata/proto/metadata_source.pb.h"
 #include "ml_metadata/util/metadata_source_query_config.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
 
 namespace ml_metadata {
 namespace testing {
@@ -35,14 +37,20 @@ namespace {
 // to generate and retrieve a MetadataAccessObject based on a
 // SqliteMetadataSource.
 class SqliteMetadataAccessObjectContainer
-    : public MetadataAccessObjectContainer {
+    : public QueryConfigMetadataAccessObjectContainer {
  public:
-  SqliteMetadataAccessObjectContainer() : MetadataAccessObjectContainer() {
+  SqliteMetadataAccessObjectContainer(
+      absl::optional<int64> earlier_schema_version = absl::nullopt)
+      : QueryConfigMetadataAccessObjectContainer(
+            util::GetSqliteMetadataSourceQueryConfig(),
+            earlier_schema_version) {
     SqliteMetadataSourceConfig config;
     metadata_source_ = absl::make_unique<SqliteMetadataSource>(config);
-    TF_CHECK_OK(MetadataAccessObject::Create(
-        util::GetSqliteMetadataSourceQueryConfig(), metadata_source_.get(),
-        &metadata_access_object_));
+    CHECK_EQ(
+        absl::OkStatus(),
+        CreateMetadataAccessObject(
+            util::GetSqliteMetadataSourceQueryConfig(), metadata_source_.get(),
+            earlier_schema_version, &metadata_access_object_));
   }
 
   ~SqliteMetadataAccessObjectContainer() override = default;
@@ -61,7 +69,7 @@ class SqliteMetadataAccessObjectContainer
 
 }  // namespace
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     SqliteMetadataAccessObjectTest, MetadataAccessObjectTest,
     ::testing::Values([]() {
       return absl::make_unique<SqliteMetadataAccessObjectContainer>();

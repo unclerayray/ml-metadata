@@ -16,23 +16,30 @@ syntax = "proto2";
 
 package ml_metadata;
 
+import "google/protobuf/struct.proto";
+
 // A value in properties.
 message Value {
-  // TODO(martinz): the types here may evolve over time.
   oneof value {
     int64 int_value = 1;
     double double_value = 2;
     string string_value = 3;
+    google.protobuf.Struct struct_value = 4;
   }
 }
 
 message Artifact {
-  // The id of the artifact.
+  // Output only. The globally unique server generated id of the artifact.
   optional int64 id = 1;
-  // The id of an ArtifactType.
-  // Type must be specified when an artifact is created, and it cannot be
-  // changed.
+  // The client provided name of the artifact. This field is optional. If set,
+  // it must be unique among all the artifacts of the same artifact type within
+  // a database instance and cannot be changed once set.
+  optional string name = 7;
+  // The id of an ArtifactType. This needs to be specified when an artifact is
+  // created, and it cannot be changed.
   optional int64 type_id = 2;
+  // Output only. The name of an ArtifactType.
+  optional string type = 8;
   // The uniform resource identifier of the physical artifact.
   // May be empty if there is no physical artifact.
   optional string uri = 3;
@@ -41,15 +48,36 @@ message Artifact {
   map<string, Value> properties = 4;
   // User provided custom properties which are not defined by its type.
   map<string, Value> custom_properties = 5;
+
+  enum State {
+    UNKNOWN = 0;
+    // A state indicating that the artifact may exist.
+    PENDING = 1;
+    // A state indicating that the artifact should exist, unless something
+    // external to the system deletes it.
+    LIVE = 2;
+    // A state indicating that the artifact should be deleted.
+    MARKED_FOR_DELETION = 3;
+    // A state indicating that the artifact has been deleted.
+    DELETED = 4;
+  }
+
+  // The state of the artifact known to the system.
+  optional State state = 6;
+  // Output only. Create time of the artifact in millisecond since epoch.
+  optional int64 create_time_since_epoch = 9;
+  // Output only. Last update time of the artifact since epoch in millisecond
+  // since epoch.
+  optional int64 last_update_time_since_epoch = 10;
 }
 
-// TODO(martinz): consider moving this inside some message, to avoid having
-// literals directly in apo package.
+// The list of supported property value types.
 enum PropertyType {
   UNKNOWN = 0;
   INT = 1;
   DOUBLE = 2;
   STRING = 3;
+  STRUCT = 4;
 }
 
 message ArtifactType {
@@ -58,6 +86,10 @@ message ArtifactType {
   // The name of the type. It must be unique among ArtifactTypes within a
   // database instance.
   optional string name = 2;
+  // An optional version of the type. An empty string is treated as unset.
+  optional string version = 4;
+  // An optional description about the type.
+  optional string description = 5;
   // The schema of the type.
   // Properties are always optional in the artifact.
   // Properties of an artifact type can be expanded but not contracted (i.e.,
@@ -65,28 +97,74 @@ message ArtifactType {
   map<string, PropertyType> properties = 3;
 }
 
-// An event represents a relationship between an artifact ID and an
-// execution.
-// There are four kinds of events, relating to both input and output, as
-// well as declared versus undeclared.
-// For example, the DECLARED_INPUT events are part of the signature of an
-// execution. For example, consider:
-// my_execution({"data":[3,7],"schema":8})
-// Where 3, 7, and 8 are artifact_ids. Assuming execution_id is 12, this
-// becomes:
-// {artifact_id:3, execution_id: 12, type:DECLARED_INPUT,
-//  path:{step:[{"key":"data"},{"index":0}]}}
-// {artifact_id:7, execution_id: 12, type:DECLARED_INPUT,
-//  path:{step:[{"key":"data"},{"index":1}]}}
-// {artifact_id:8, execution_id: 12, type:DECLARED_INPUT,
-//  path:{step:[{"key":"schema"}]}}
-// The INPUT is an artifact actually read by the execution.
-// The OUTPUT is an artifact actually written by the execution.
-// The DECLARED_OUTPUT are the artifacts that are the "official" output.
-// For example, the trainer may output multiple caches of the parameters
-// (as OUTPUT objects),
-// but then finally write the SavedModel as a DECLARED_OUTPUT.
-// TODO(martinz): add a type for Event, similar to ArtifactType.
+// An event represents a relationship between an artifact and an execution.
+// There are different kinds of events, relating to both input and output, as
+// well as how they are used by the mlmd powered system.
+// For example, the DECLARED_INPUT and DECLARED_OUTPUT events are part of the
+// signature of an execution. For example, consider:
+//
+//   my_result = my_execution({"data":[3,7],"schema":8})
+//
+// Where 3, 7, and 8 are artifact_ids, Assuming execution_id of my_execution is
+// 12 and artifact_id of my_result is 15, the events are:
+//   {
+//       artifact_id:3,
+//       execution_id: 12,
+//       type:DECLARED_INPUT,
+//       path:{step:[{"key":"data"},{"index":0}]}
+//   }
+//   {
+//       artifact_id:7,
+//       execution_id: 12,
+//       type:DECLARED_INPUT,
+//       path:{step:[{"key":"data"},{"index":1}]}
+//   }
+//   {
+//       artifact_id:8,
+//       execution_id: 12,
+//       type:DECLARED_INPUT,
+//       path:{step:[{"key":"schema"}]}
+//   }
+//   {
+//       artifact_id:15,
+//       execution_id: 12,
+//       type:DECLARED_OUTPUT,
+//       path:{step:[{"key":"my_result"}]}
+//   }
+// Other event types include INPUT/OUTPUT and INTERNAL_INPUT/_OUTPUT.
+// * The INPUT/OUTPUT is an event that actually reads/writes an artifact by an
+//   execution. The input/output artifacts may not declared in the signature,
+//   For example, the trainer may output multiple caches of the parameters
+//   (as an OUTPUT), then finally write the SavedModel as a DECLARED_OUTPUT.
+// * The INTERNAL_INPUT/_OUTPUT are event types which are only meaningful to
+//   an orchestration system to keep track of the details for later debugging.
+//   For example, a fork happened conditioning on an artifact, then an execution
+//   is triggered, such fork implementating may need to log the read and write
+//   of artifacts and may not be worth displaying to the users.
+//
+// For instance, in the above example,
+//
+//   my_result = my_execution({"data":[3,7],"schema":8})
+//
+// there is another execution (id: 15), which represents a `garbage_collection`
+// step in an orchestration system
+//
+//   gc_result = garbage_collection(my_result)
+//
+// that cleans `my_result` if needed. The details should be invisible to the
+// end users and lineage tracking. The orchestrator can emit following events:
+//
+//   {
+//       artifact_id: 15,
+//       execution_id: 15,
+//       type:INTERNAL_INPUT,
+//   }
+//   {
+//       artifact_id:16,  // New artifact containing the GC job result.
+//       execution_id: 15,
+//       type:INTERNAL_OUTPUT,
+//       path:{step:[{"key":"gc_result"}]}
+//   }
 message Event {
   // A simple path (e.g. {step{key:"foo"}}) can name an artifact in the context
   // of an execution.
@@ -111,6 +189,8 @@ message Event {
     DECLARED_INPUT = 2;   // A declared input of the execution.
     INPUT = 3;            // An input of the execution.
     OUTPUT = 4;           // An output of the execution.
+    INTERNAL_INPUT = 5;   // An internal input of the execution.
+    INTERNAL_OUTPUT = 6;  // An internal output of the execution.
   }
   // The artifact id is required for an event, and should refer to an
   // existing artifact.
@@ -128,14 +208,25 @@ message Event {
 }
 
 message Execution {
-  // The id of the execution.
+  // Output only. The globally unique server generated id of the execution.
   optional int64 id = 1;
+  // The client provided name of the execution. This field is optional. If set,
+  // it must be unique among all the executions of the same artifact type within
+  // a database instance and cannot be changed once set.
+  optional string name = 6;
+  // The id of an ExecutionType. This needs to be specified when an execution is
+  // created, and it cannot be changed.
   // The id of an ExecutionType.
-  // The ExecutionType must be specified and cannot be changed.
   optional int64 type_id = 2;
+  // Output only. The name of an ExecutionType.
+  optional string type = 7;
   // The state of the Execution. The state transitions are
-  //   NEW -> RUNNING -> COMPLETE | CACHED | FAILED
+  //   NEW -> RUNNING -> COMPLETE | CACHED | FAILED | CANCELED
   // CACHED means the execution is skipped due to cached results.
+  // CANCELED means the execution is skipped due to precondition not met. It is
+  // different from CACHED in that a CANCELED execution will not have any event
+  // associated with it. It is different from FAILED in that there is no
+  // unexpected error happened and it is regarded as a normal state.
   enum State {
     UNKNOWN = 0;
     NEW = 1;
@@ -143,14 +234,19 @@ message Execution {
     COMPLETE = 3;
     FAILED = 4;
     CACHED = 5;
+    CANCELED = 6;
   }
-  // The last known state of an execution.
+  // The last known state of an execution in the system.
   optional State last_known_state = 3;
   // Properties of the Execution.
   // Properties must be specified in the ExecutionType.
   map<string, Value> properties = 4;
   // User provided custom properties which are not defined by its type.
   map<string, Value> custom_properties = 5;
+  // Output only. Create time of the execution in millisecond since epoch.
+  optional int64 create_time_since_epoch = 8;
+  // Output only. Last update time of the execution in millisecond since epoch.
+  optional int64 last_update_time_since_epoch = 9;
 }
 
 message ExecutionType {
@@ -159,6 +255,10 @@ message ExecutionType {
   // The name of the type. It must be unique among ExecutionTypes within a
   // database instance.
   optional string name = 2;
+  // An optional version of the type. An empty string is treated as unset.
+  optional string version = 6;
+  // An optional description about the type.
+  optional string description = 7;
   // The schema of the type.
   // Properties are always optional in the execution.
   map<string, PropertyType> properties = 3;
@@ -191,6 +291,10 @@ message ContextType {
   // The name of the type, e.g., Pipeline, Task, Session, User, etc. It must be
   // unique among ContextTypes within a database instance.
   optional string name = 2;
+  // An optional version of the type. An empty string is treated as unset.
+  optional string version = 4;
+  // An optional description about the type.
+  optional string description = 5;
   // The schema of the type, e.g., name: string, owner: string
   // Properties are always optional in the context.
   // Properties of an context type can be expanded but not contracted (i.e.,
@@ -199,17 +303,24 @@ message ContextType {
 }
 
 message Context {
-  // The id of the context instance.
+  // Output Only. The globally unique server generated id of the context.
   optional int64 id = 1;
-  // The id of its ContextType. ContextType must be specified when a context is
+  // The client provided name of the context. It must be unique within a
+  // database instance.
+  optional string name = 3;
+  // The id of a ContextType. This needs to be specified when a context is
   // created, and it cannot be changed.
   optional int64 type_id = 2;
-  // The unique user given name of the Context.
-  optional string name = 3;
+  // Output only. The name of a ContextType.
+  optional string type = 6;
   // Values of the properties, which must be specified in the ContextType.
   map<string, Value> properties = 4;
   // User provided custom properties which are not defined by its type.
   map<string, Value> custom_properties = 5;
+  // Output only. Create time of the context in millisecond since epoch.
+  optional int64 create_time_since_epoch = 7;
+  // Output only. Last update time of the context in millisecond since epoch.
+  optional int64 last_update_time_since_epoch = 8;
 }
 
 // the Attribution edges between Context and Artifact instances.
@@ -230,6 +341,25 @@ message ParentContext {
   optional int64 parent_id = 2;
 }
 
+// A self-contained provenance (sub)graph representation consists of MLMD nodes
+// and their relationships. It is used to represent the query results from the
+// persistent backend (e.g., lineage about a node, reachability of two nodes).
+message LineageGraph {
+  // extracted types
+  repeated ArtifactType artifact_types = 1;
+  repeated ExecutionType execution_types = 2;
+  repeated ContextType context_types = 3;
+  // extracted nodes
+  repeated Artifact artifacts = 4;
+  repeated Execution executions = 5;
+  repeated Context contexts = 6;
+  // extracted edges
+  repeated Event events = 7;
+  repeated Attribution attributions = 8;
+  repeated Association associations = 9;
+}
+
+// The list of ArtifactStruct is EXPERIMENTAL and not in use yet.
 // The type of an ArtifactStruct.
 // An artifact struct type represents an infinite set of artifact structs.
 // It can specify the input or output type of an ExecutionType.
@@ -356,7 +486,7 @@ message MySQLDatabaseConfig {
   optional uint32 port = 2;
   // The database to connect to. Must be specified.
   // After connecting to the MYSQL server, this database is created if not
-  // already present.
+  // already present unless skip_db_creation is set.
   // All queries after Connect() are assumed to be for this database.
   optional string database = 3;
   // The MYSQL login id. If empty, the current user is assumed.
@@ -380,11 +510,19 @@ message MySQLDatabaseConfig {
     optional string capath = 4;
     // The list of permissible ciphers for SSL encryption.
     optional string cipher = 5;
+    // If set, enable verification of the server certificate against the host
+    // name used when connecting to the server.
+    optional bool verify_server_cert = 6;
   }
   // If the field is set, the ssl options are set in mysql_options before
   // establishing a connection. It is ignored if the mysql server does not
   // enable SSL.
   optional SSLOptions ssl_options = 7;
+
+  // A config to skip the database creation if not exist when connecting the
+  // db instance. It is useful when the db creation is handled by an admin
+  // process, while the lib user should not issue db creation clauses.
+  optional bool skip_db_creation = 8;
 }
 
 // A config contains the parameters when using with SqliteMetadatSource.
@@ -410,7 +548,8 @@ message SqliteMetadataSourceConfig {
     // Connect a metadata source in read/write mode. Connection fail if the
     // sqlite3 database at the `filename` does not exist.
     READWRITE = 2;
-    // Similar to READWRITE. In addition, it creates the database if not exits.
+    // Similar to READWRITE. In addition, it creates the database if it does not
+    // exist.
     READWRITE_OPENCREATE = 3;
   }
 
@@ -446,6 +585,11 @@ message MigrationOptions {
   reserved 1;
 }
 
+message RetryOptions {
+  // The max number of retries when transaction returns Aborted error.
+  optional int64 max_num_retries = 1;
+}
+
 message ConnectionConfig {
   // Configuration for a new connection.
   oneof config {
@@ -453,6 +597,19 @@ message ConnectionConfig {
     MySQLDatabaseConfig mysql = 2;
     SqliteMetadataSourceConfig sqlite = 3;
   }
+
+  // Options for overwriting the default retry setting when MLMD transactions
+  // returning Aborted error.
+  // The setting is currently available for python client library only.
+  // TODO(b/154862807) set the setting in transaction executor.
+  optional RetryOptions retry_options = 4;
+}
+
+// A list of supported GRPC arguments defined in:
+// https://grpc.github.io/grpc/core/group__grpc__arg__keys.html
+message GrpcChannelArguments {
+  // Maximum message length in bytes per response that the channel can receive.
+  optional int64 max_receive_message_length = 1;
 }
 
 // Configuration for the gRPC metadata store client.
@@ -464,17 +621,30 @@ message MetadataStoreClientConfig {
   optional uint32 port = 2;
 
   message SSLConfig {
-    // Private client key for SSL
+    // The PEM-encoded private key as a byte string, or Empty if no private key
+    // should be used.
     optional string client_key = 1;
-    // Public server certificate
+    // The PEM-encoded certificate chain as a byte string to use or or Empty if
+    // no certificate chain should be used.
     optional string server_cert = 2;
-    // Custom certificate authority
+    // The PEM-encoded root certificates as a byte string, or Empty to retrieve
+    // them from a default location chosen by gRPC runtime.
     optional string custom_ca = 3;
   }
 
   // Configuration for a secure gRPC channel.
   // If not given, insecure connection is used.
   optional SSLConfig ssl_config = 3;
+
+  // GRPC channel creation arguments.
+  optional GrpcChannelArguments channel_arguments = 4;
+
+  // Time duration that a client is willing to wait for a reply from the server.
+  // If unset, the timeout is considered infinite. When the field is specified,
+  // Grpc APIs would return DeadlineExceededError when server does not respond
+  // within `client_timeout_sec`. Floating point valued, in seconds.
+  optional double client_timeout_sec = 5;
+
 }
 
 // Configuration for the gRPC metadata store server.
@@ -500,3 +670,64 @@ message MetadataStoreServerConfig {
   // If not given, insecure connection is used.
   optional SSLConfig ssl_config = 2;
 }
+
+// ListOperationOptions represents the set of options and predicates to be
+// used for List operations on Artifacts, Executions and Contexts.
+message ListOperationOptions {
+  // Max number of resources to return in the result. A value of zero or less
+  // results in a InvalidArgumentError.
+  // The API implementation also enforces an upper-bound of 100, and picks the
+  // minimum between this value and the one specified here.
+  optional int32 max_result_size = 1 [default = 20];
+
+  message OrderByField {
+    // Supported fields for Ordering.
+    enum Field {
+      FIELD_UNSPECIFIED = 0;
+      CREATE_TIME = 1;
+      LAST_UPDATE_TIME = 2;
+      ID = 3;
+    }
+
+    // Field to order.
+    optional Field field = 1 [default = ID];
+
+    // Direction of ordering.
+    optional bool is_asc = 2 [default = true];
+  }
+
+  // Ordering field.
+  optional OrderByField order_by_field = 2;
+
+  // Identifies the next page of results.
+  optional string next_page_token = 3;
+
+}
+
+// Encapsulates information to identify the next page of resources in
+// ListOperation.
+message ListOperationNextPageToken {
+  // Id offset within the resultset to start next page.
+  // Id offset is returned as Id is the unique field used to break ties for
+  // fields that might have duplicate entries, e.g. there could be two
+  // resources with same create_time. In such cases to  break the tie in
+  // ordering, id offset is used.
+  // This field is currently only set whe order_by field is CREATE_TIME.
+  optional int64 id_offset = 1;
+
+  // Offset value of the order by field. If ID is used this value is same as
+  // id_offset.
+  optional int64 field_offset = 2;
+
+  // Options set in the first call to ListOperation. This ensures that if
+  // next_page_token is set by the caller then ListPipelineJobs API will always
+  // use options set in the first call.
+  optional ListOperationOptions set_options = 3;
+
+  // List of ids that have the same order_by field values. This is used to
+  // ensure List Operation does not return duplicate entries for nodes that have
+  // the same order_by field value.
+  // This field is currently only set whe order_by field is LAST_UPDATE_TIME.
+  repeated int64 listed_ids = 4;
+}
+

@@ -164,11 +164,6 @@ across languages.
 
 """
 
-from __future__ import absolute_import
-from __future__ import division
-
-from __future__ import print_function
-
 import abc
 import collections
 import copy
@@ -315,7 +310,7 @@ def _set_custom_value(result: metadata_store_pb2.Value,
     raise ValueError("unknown property type")
 
 
-class _NodeAndType(object):
+class _NodeAndType(object):  # pytype: disable=ignored-metaclass
   """A base type for Artifact and Execution."""
   __metaclass__ = abc.ABCMeta
 
@@ -547,7 +542,7 @@ class Artifact(_NodeAndType):
     assert self.artifact.type_id == self.type.id
     [self.artifact.id] = store.put_artifacts([self._artifact])
 
-  def __str__(self) -> str:  # pylint: disable=g-ambiguous-str-annotation
+  def __str__(self) -> str:
     return json.dumps(self._create_pre_json())
 
 
@@ -654,7 +649,7 @@ def create_json(artifact_struct: ArtifactStruct) -> Text:
   return json.dumps(_create_pre_json(artifact_struct))
 
 
-class ArtifactStructType(object):
+class ArtifactStructType(object):  # pytype: disable=ignored-metaclass
   """The base type for all type structures.
 
   At present, there is one method, is_instance. This is a useful place to
@@ -700,7 +695,7 @@ class _NoneArtifactStructType(ArtifactStructType):
   def is_type_of(self, struct: ArtifactStruct) -> bool:
     return struct is None
 
-  def __str__(self) -> str:  # pylint: disable=g-ambiguous-str-annotation
+  def __str__(self) -> str:
     return "None"
 
 
@@ -710,7 +705,7 @@ class _AnyArtifactStructType(ArtifactStructType):
   def is_type_of(self, struct: ArtifactStruct) -> bool:
     return True
 
-  def __str__(self) -> str:  # pylint: disable=g-ambiguous-str-annotation
+  def __str__(self) -> str:
     return "Any"
 
 
@@ -726,7 +721,7 @@ class _UnionArtifactStructType(ArtifactStructType):
         return True
     return False
 
-  def __str__(self) -> str:  # pylint: disable=g-ambiguous-str-annotation
+  def __str__(self) -> str:
     return "Union[{}]".format(", ".join([str(x) for x in self._candidates]))
 
 
@@ -753,7 +748,7 @@ class _IntersectionArtifactStructType(ArtifactStructType):
         return False
     return True
 
-  def __str__(self) -> str:  # pylint: disable=g-ambiguous-str-annotation
+  def __str__(self) -> str:
     return "Intersection[{}]".format(", ".join(
         [str(x) for x in self._candidates]))
 
@@ -771,7 +766,7 @@ class _SimpleArtifactStructType(ArtifactStructType):
       return False
     return struct.is_instance_of_type(self._type)
 
-  def __str__(self) -> str:  # pylint: disable=g-ambiguous-str-annotation
+  def __str__(self) -> str:
     return str(self._type)
 
 
@@ -789,7 +784,7 @@ class _ListArtifactStructType(ArtifactStructType):
         return False
     return True
 
-  def __str__(self) -> str:  # pylint: disable=g-ambiguous-str-annotation
+  def __str__(self) -> str:
     return "List[{}]".format(str(self._element_type))
 
 
@@ -809,7 +804,7 @@ class _TupleArtifactStructType(ArtifactStructType):
         return False
     return True
 
-  def __str__(self) -> str:  # pylint: disable=g-ambiguous-str-annotation
+  def __str__(self) -> str:
     return "Tuple[{}]".format(", ".join([str(x) for x in self._element_types]))
 
 
@@ -852,7 +847,7 @@ class DictArtifactStructType(ArtifactStructType):
           return False
     return True
 
-  def __str__(self) -> str:  # pylint: disable=g-ambiguous-str-annotation
+  def __str__(self) -> str:
     return "Dict[{}]".format(", ".join(
         ["{}:{}".format(k, v) for k, v in self._dict_type.items()]))
 
